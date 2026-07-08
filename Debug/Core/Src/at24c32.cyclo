@@ -1,0 +1,4 @@
+../Core/Src/at24c32.c:15:6:AT24C32_WriteByte	1
+../Core/Src/at24c32.c:25:9:AT24C32_ReadByte	1
+../Core/Src/at24c32.c:38:6:AT24C32_WriteBuffer	2
+../Core/Src/at24c32.c:60:6:AT24C32_ReadBuffer	1

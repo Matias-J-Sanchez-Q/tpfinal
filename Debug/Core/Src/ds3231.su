@@ -1,0 +1,4 @@
+../Core/Src/ds3231.c:12:16:bcd2dec	16	static
+../Core/Src/ds3231.c:17:16:dec2bcd	16	static
+../Core/Src/ds3231.c:25:6:DS3231_GetTime	40	static
+../Core/Src/ds3231.c:44:6:DS3231_SetTime	40	static

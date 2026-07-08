@@ -1,0 +1,4 @@
+../Core/Src/datalog.c:21:10:DataLog_MaxEntries	1
+../Core/Src/datalog.c:31:6:DataLog_Init	5
+../Core/Src/datalog.c:67:6:DataLog_SaveDigit	2
+../Core/Src/datalog.c:102:9:DataLog_ReadEntry	2
