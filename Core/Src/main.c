@@ -36,37 +36,33 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* Boton de accion unico (pulsador externo entre PB0 y GND): confirma cada
-   digito tanto al cambiar como al ingresar la clave */
+/* Pulsador de confirmar (entre PB0 y GND). Con este confirmo cada digito,
+   sirve igual para cambiar la clave que para ingresarla. */
 #define CONFIRM_BTN_GPIO_Port   GPIOB
 #define CONFIRM_BTN_Pin         GPIO_PIN_0
 
-/* PA1: detector de apertura de puerta (reed switch / contacto magnetico
-   entre el pin y GND, con pull-up interno).
-   Con pull-up:  puerta CERRADA = pin a GND (0),  ABIERTA = 1.
-   Si tu sensor da el estado invertido, cambiar == GPIO_PIN_SET por RESET. */
+/* Sensor de puerta en PA1 (uso un reed switch a GND con el pull-up interno).
+   Con pull-up queda: cerrada = 0, abierta = 1. Si el sensor mio diera al
+   reves, doy vuelta el GPIO_PIN_SET por RESET y listo. */
 #define DOOR_GPIO_Port          GPIOA
 #define DOOR_Pin                GPIO_PIN_1
 #define DOOR_IS_OPEN()          (HAL_GPIO_ReadPin(DOOR_GPIO_Port, DOOR_Pin) == GPIO_PIN_SET)
 
-/* Umbral (en milivolts) del segundo ADC (ADC2/PA7): si la tension medida
-   lo supera, se dispara la alarma. 1000 mV = 1V. */
+/* Umbral del ADC2 (PA7) en mV. Si la tension pasa esto, salta la alarma. */
 #define ADC2_ALARM_MV           1000
 
-/* Salida de alarma: se pone en 3.3V (nivel alto) cuando la clave es incorrecta.
-   Cambiar puerto/pin aca si necesitas otro. */
+/* Pin de alarma: lo pongo en alto cuando la clave esta mal. Si quiero otro
+   pin lo cambio aca. */
 #define ALARM_GPIO_Port         GPIOA
 #define ALARM_Pin               GPIO_PIN_4
 
-/* Salida de "clave correcta": se pone en 3.3V (nivel alto) cuando la clave
-   coincide. NOTA: el pin entrega 3.3V, no 5V. Para 5V usar un transistor/
-   MOSFET o modulo rele comandado por este pin. */
+/* Pin de "clave OK". Ojo que entrega 3.3V, no 5V: si necesito 5V va con un
+   transistor o un modulo rele manejado desde este pin. */
 #define OK_GPIO_Port            GPIOA
 #define OK_Pin                  GPIO_PIN_6
 
-/* Servo SG90 (180 grados) en PB6 = TIM4_CH1.
-   PWM 50 Hz: pulso 500 us = 0 grados, 2500 us = 180 grados.
-   Cerrado = traba puesta; Abierto = traba liberada. Ajustar a gusto. */
+/* Servo SG90 en PB6 (TIM4_CH1). PWM de 50 Hz, pulso 500us=0deg, 2500us=180deg.
+   Cerrado = traba puesta, abierto = traba liberada. Los angulos los ajuste a ojo. */
 #define SERVO_CLOSED_DEG        20
 #define SERVO_OPEN_DEG          90
 /* USER CODE END PD */
@@ -92,59 +88,99 @@ char lcd_buf[24];
 /* PWM del servo del cerrojo SG90 (TIM4_CH1 / PB6) */
 TIM_HandleTypeDef htim4;
 
-/* Segundo conversor ADC (ADC2) para medir una tension de 0 a 3.3V en PA7 */
+/* ADC2 para medir 0 a 3.3V en PA7 */
 ADC_HandleTypeDef hadc2;
 uint16_t adc2_val = 0;   /* lectura cruda 0-4095 */
-uint16_t adc2_mv  = 0;   /* misma lectura convertida a milivolts (0-3300) */
+uint16_t adc2_mv  = 0;   /* la misma pero en mV (0-3300) */
 
-/* --- Modos de operacion (el boton azul B1 los recorre en ciclo) ---
-   El orden define el ciclo del boton azul: Ingresar -> Cambiar -> Menu ->
-   Ingresar ...  El modo por defecto (en reposo, sin tocar el azul) es
-   Ingresar clave. Con 2 pulsadas del azul se llega al Menu. */
+/* Modos de operacion. El boton azul (B1) los va rotando:
+   Ingresar -> Cambiar -> Menu -> Ingresar... Arranca siempre en Ingresar,
+   asi que con dos toques del azul llego al Menu. */
 #define PASSWORD_LEN            4
-#define MODE_VERIFY             0  /* (por defecto) ingresa una clave para comparar */
-#define MODE_CHANGE             1  /* captura una clave nueva (4 digitos) */
-#define MODE_MENU               2  /* menu: pote elige opcion, PB0 confirma */
+#define MODE_VERIFY             0  /* por defecto: ingreso una clave y la comparo */
+#define MODE_CHANGE             1  /* cargo una clave nueva (4 digitos) */
+#define MODE_MENU               2  /* menu: elijo con el pote, confirmo con PB0 */
 #define MODE_COUNT              3
 
-/* Submodos dentro del Menu */
-#define MENU_SELECT             0  /* eligiendo opcion con el potenciometro */
-#define MENU_LOG                1  /* viendo el registro de intentos */
+/* Submodos del Menu */
+#define MENU_SELECT             0  /* eligiendo con el pote */
+#define MENU_LOG                1  /* viendo los intentos */
 #define MENU_CLOCK              2  /* viendo el reloj */
-#define MENU_OPT_COUNT          2  /* cantidad de opciones del menu */
+#define MENU_OPT_COUNT          2
 
-volatile uint8_t button_flag = 0;      /* la ISR (boton azul B1) la pone en 1 */
-uint8_t  app_mode = MODE_VERIFY;       /* modo actual (arranca en Ingresar) */
-uint8_t  menu_state = MENU_SELECT;     /* submodo dentro del Menu */
+volatile uint8_t button_flag = 0;      /* lo levanta la ISR del boton azul */
+uint8_t  app_mode = MODE_VERIFY;       /* modo actual */
+uint8_t  menu_state = MENU_SELECT;     /* submodo del menu */
 
-/* Textos de las opciones del menu (deben entrar en 15 caracteres) */
+/* Opciones del menu (tienen que entrar en 15 chars) */
 static const char *const menu_opts[MENU_OPT_COUNT] = { "Ver registro", "Ver reloj" };
 
-uint8_t  password_index = 0;           /* digitos de la clave nueva ya cargados */
-uint8_t  password[PASSWORD_LEN] = {0}; /* contrasena guardada */
-uint8_t  password_set = 0;             /* 1 si ya se guardo una contrasena */
+uint8_t  password_index = 0;           /* cuantos digitos de la clave nueva lleve */
+uint8_t  password[PASSWORD_LEN] = {0}; /* la clave guardada */
+uint8_t  password_set = 0;             /* 1 si ya hay una clave */
 
-uint8_t  verify_index = 0;                  /* digitos ingresados para verificar */
-uint8_t  verify_buffer[PASSWORD_LEN] = {0}; /* digitos ingresados para comparar */
+uint8_t  verify_index = 0;                  /* digitos que llevo ingresados */
+uint8_t  verify_buffer[PASSWORD_LEN] = {0}; /* lo que voy tecleando para comparar */
 
-/* Boton de accion unico (PB0 -> GND): confirma cada digito, tanto al
-   cambiar como al ingresar la clave. Se lee por flanco descendente
-   (con pull-up: suelto=1, presionado=0). */
+/* Boton PB0 (a GND): confirma cada digito. Lo leo por flanco de bajada,
+   con el pull-up queda suelto=1, apretado=0. */
 GPIO_PinState action_btn_last = GPIO_PIN_SET;
 
-/* Estado del detector de puerta */
-uint8_t  door_last = 0;   /* estado previo (0 = cerrada al arrancar) */
-uint8_t  disarmed  = 0;   /* 1 tras clave correcta: sistema desarmado; no suena
-                             la alarma hasta que la puerta se cierre de nuevo */
+/* Detector de puerta */
+uint8_t  door_last = 0;   /* como estaba en la vuelta anterior (arranca cerrada) */
+uint8_t  disarmed  = 0;   /* 1 despues de una clave correcta: queda desarmado y la
+                             alarma no suena hasta que cierro la puerta otra vez */
 
-/* --- Modo reposo: tras un tiempo sin actividad, apaga la pantalla y la luz
-   de fondo. Sale del reposo al detectar movimiento del potenciometro (PA0).
-   La seguridad (puerta y alarma por tension) sigue activa en reposo. --- */
-#define REPOSO_TIMEOUT_MS    15000   /* 15 s sin actividad -> reposo */
-#define POT_MOVE_THRESHOLD   120     /* variacion minima del ADC (0-4095) = "movimiento" */
-uint8_t  in_reposo = 0;              /* 1 mientras esta en reposo */
-uint32_t last_activity_tick = 0;     /* ultimo instante con actividad */
-uint32_t adc_ref = 0;                /* posicion del pote de referencia para el movimiento */
+/* Modo reposo: si paso un rato sin tocar nada, apago la pantalla y el
+   backlight. Vuelve a despertar cuando muevo el pote (PA0). Ojo: la parte
+   de seguridad (puerta y alarma por tension) sigue viva igual. */
+#define REPOSO_TIMEOUT_MS    15000   /* 15s quieto y me voy a dormir */
+#define POT_MOVE_THRESHOLD   120     /* cuanto tiene que moverse el pote para contar como "movimiento" */
+uint8_t  in_reposo = 0;              /* 1 mientras duerme */
+uint32_t last_activity_tick = 0;     /* ultima vez que hubo actividad */
+uint32_t adc_ref = 0;                /* posicion del pote de referencia para medir el movimiento */
+
+/* Nada de HAL_Delay: todo por tiempo con HAL_GetTick() asi el CPU no se
+   frena nunca. La UI se refresca cada UI_PERIOD_MS y los mensajes (clave
+   ok/mal/guardada) se sostienen solos. Mientras tanto la seguridad
+   (puerta, alarma, servo) sigue corriendo sin cortarse. */
+#define UI_PERIOD_MS       300    /* cada cuanto refresco la pantalla */
+#define MSG_SHOW_MS        2000    /* cuanto dejo un mensaje en pantalla */
+
+uint32_t ui_tick        = 0;   /* ultimo refresco del LCD */
+uint8_t  msg_active     = 0;   /* 1 mientras hay un mensaje temporal */
+uint32_t msg_until      = 0;   /* tick en el que se vence el mensaje */
+uint32_t ok_pulse_until = 0;   /* mantengo PA6 (OK) en alto hasta aca */
+uint32_t alarm_until    = 0;   /* mantengo PA4 (alarma) en alto hasta aca */
+uint8_t  action_pending = 0;   /* flanco de PB0 guardado hasta que la UI lo use */
+
+/* Mido el WCET de una vuelta del loop con el contador de ciclos del DWT.
+   No necesito ninguna libreria, va con CMSIS y lo miro por Live Expressions.
+   A 8 MHz, 1 us = 8 ciclos (SystemCoreClock/1000000). */
+volatile uint32_t let_cycles  = 0;   /* ciclos de la ultima vuelta */
+volatile uint32_t let_us      = 0;   /* esa vuelta en us */
+volatile uint32_t wcet_cycles = 0;   /* peor caso en ciclos <- lo que me interesa */
+volatile uint32_t wcet_us     = 0;   /* peor caso en us */
+
+/* Factor de uso U = WCET / periodo. Como el superloop no tiene un periodo
+   fijo, me invento uno de referencia: cada cuanto quiero que el loop de una
+   vuelta entera. Lo dejo en 1 ms (el mismo tick del framework de la catedra).
+   Si U<1 el sistema es planificable, si U>1 no da. */
+#define WCET_PERIOD_US   1000U
+volatile float    u_factor = 0.0f;   /* U como fraccion (1.0 = 100% de CPU) */
+volatile uint32_t u_x1000  = 0;      /* U x1000 por si no quiero float (4200 = 4.200) */
+volatile uint32_t u_pct    = 0;      /* U en % */
+
+/* Promedio de la vuelta (ACET), media de todas desde que arranco */
+volatile uint32_t avg_cycles = 0;
+volatile uint32_t avg_us     = 0;
+static   uint64_t _acc_cycles = 0;   /* voy sumando ciclos aca */
+static   uint32_t _sample_cnt = 0;   /* y cuento las vueltas aca */
+
+/* Lo mismo que U pero con el promedio en vez del peor caso */
+volatile float    u_avg_factor = 0.0f;
+volatile uint32_t u_avg_x1000  = 0;
+volatile uint32_t u_avg_pct    = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -160,17 +196,14 @@ static void MX_I2C1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* --- Almacen de la contrasena en la EEPROM AT24C32 ---
-   Se guarda en la zona reservada 0x0004-0x000F (fuera del datalog).
-   Layout (6 bytes usados):
-     [0] = firma 0xC3 (indica que hay una contrasena valida)
-     [1] = flag "hay clave" (1)
-     [2..5] = los 4 digitos de la contrasena                            */
+/* Guardo la clave en la EEPROM AT24C32, en 0x0004-0x000F (aparte del datalog).
+   Uso 6 bytes: [0] firma 0xC3 (marca que hay clave valida), [1] flag "hay
+   clave", [2..5] los 4 digitos. */
 #define PWD_STORE_ADDR   0x0004
 #define PWD_MAGIC        0xC3
 
-/* Lee la contrasena guardada en la EEPROM (llamar una vez al arrancar).
-   Si no hay una firma valida, deja password_set = 0. */
+/* Leo la clave de la EEPROM (la llamo una vez al arrancar). Si la firma no
+   coincide, arranco sin clave (password_set = 0). */
 static void Password_Load(void)
 {
   uint8_t buf[2 + PASSWORD_LEN];
@@ -191,7 +224,7 @@ static void Password_Load(void)
   }
 }
 
-/* Persiste la contrasena actual (password[]) en la EEPROM */
+/* Escribe la clave actual (password[]) en la EEPROM */
 static void Password_Save(void)
 {
   uint8_t buf[2 + PASSWORD_LEN];
@@ -206,13 +239,11 @@ static void Password_Save(void)
   AT24C32_WriteBuffer(PWD_STORE_ADDR, buf, sizeof(buf));
 }
 
-/* --- Registro de los ULTIMOS 10 intentos de clave en la EEPROM ---
-   Guarda tanto los fallidos como los correctos, en un buffer circular de
-   10 (al llegar al 11vo, pisa el mas viejo). Cada registro son 11 bytes:
-   6 de timestamp (RTC) + 4 digitos ingresados + 1 de resultado
-   (1 = correcto, 0 = fallido). Vive en su propia zona de la EEPROM,
-   a partir de ATTEMPT_STORE_ADDR, con un encabezado de 4 bytes:
-   [firma_hi, firma_lo, proximo_slot(0..9), cantidad(0..10)]. */
+/* Registro de los ultimos 10 intentos (guardo los buenos y los malos) en un
+   buffer circular: cuando se llena, el nuevo pisa al mas viejo. Cada intento
+   ocupa 11 bytes = 6 de fecha/hora + 4 digitos + 1 de resultado (1 ok, 0 mal).
+   Va en su propia zona a partir de ATTEMPT_STORE_ADDR, con 4 bytes de header:
+   firma_hi, firma_lo, proximo_slot (0..9), cuantos hay (0..10). */
 #define ATTEMPT_STORE_ADDR   0x0010
 #define ATTEMPT_MAGIC_HI     0xA7
 #define ATTEMPT_MAGIC_LO     0x10
@@ -222,8 +253,8 @@ static void Password_Save(void)
 static uint8_t attempt_next  = 0;  /* proximo slot a escribir (0..9) */
 static uint8_t attempt_count = 0;  /* intentos guardados (0..10) */
 
-/* Llamar una vez al arrancar: recupera el estado del ring si ya existe,
-   o lo formatea si es la primera vez. */
+/* La llamo una vez al arrancar: si el ring ya existe lo recupero, y si es la
+   primera vez lo dejo formateado en cero. */
 static void AttemptLog_Init(void)
 {
   uint8_t hdr[4];
@@ -248,7 +279,7 @@ static void AttemptLog_Init(void)
   }
 }
 
-/* Guarda un intento (correcto o fallido) en el siguiente slot del ring. */
+/* Mete un intento (ok o fallido) en el proximo slot del ring. */
 static void AttemptLog_Save(uint8_t *digits, uint8_t ok, DS3231_Time *t)
 {
   uint8_t rec[ATTEMPT_REC_SIZE];
@@ -270,14 +301,14 @@ static void AttemptLog_Save(uint8_t *digits, uint8_t ok, DS3231_Time *t)
   addr = (uint16_t)(ATTEMPT_STORE_ADDR + 4 + (attempt_next * ATTEMPT_REC_SIZE));
   AT24C32_WriteBuffer(addr, rec, ATTEMPT_REC_SIZE);
 
-  /* avanzar el ring de 10 */
+  /* avanzo el ring (de a 10) */
   attempt_next = (uint8_t)((attempt_next + 1) % ATTEMPT_MAX);
   if (attempt_count < ATTEMPT_MAX)
   {
     attempt_count++;
   }
 
-  /* persistir el encabezado (proximo slot + cantidad) */
+  /* y actualizo el header en la EEPROM */
   hdr[0] = ATTEMPT_MAGIC_HI;
   hdr[1] = ATTEMPT_MAGIC_LO;
   hdr[2] = attempt_next;
@@ -285,10 +316,9 @@ static void AttemptLog_Save(uint8_t *digits, uint8_t ok, DS3231_Time *t)
   AT24C32_WriteBuffer(ATTEMPT_STORE_ADDR, hdr, 4);
 }
 
-/* Inicializa un segundo conversor (ADC2) para medir 0-3.3V en PA7 (IN7).
-   Se configura todo por codigo (reloj + pin analogico + canal), asi que
-   NO hace falta habilitar ADC2 en el .ioc. Comparte el ADCCLK ya
-   configurado para ADC1. */
+/* Levanto un segundo ADC (ADC2) para medir 0-3.3V en PA7 (IN7). Lo hago todo
+   por codigo (reloj + pin + canal) asi no tengo que tocar el .ioc. Se cuelga
+   del mismo ADCCLK que ya configure para ADC1. */
 static void MX_ADC2_Init_User(void)
 {
   ADC_ChannelConfTypeDef sConfig = {0};
@@ -323,19 +353,19 @@ static void MX_ADC2_Init_User(void)
   }
 }
 
-/* Apaga la pantalla y la luz de fondo del LCD (entrar en reposo). */
+/* Apaga display + backlight para irse a dormir. */
 static void LCD_Sleep(void)
 {
-  uint8_t off = 0x00;  /* todos los pines del PCF8574 en 0 => backlight apagada */
+  uint8_t off = 0x00;  /* con todo el PCF8574 en 0 se apaga el backlight */
   lcd_send_cmd(0x08);  /* display off */
   HAL_I2C_Master_Transmit(&hi2c1, SLAVE_ADDRESS_LCD, &off, 1, 100);
 }
 
-/* Reactiva la pantalla + luz de fondo y redibuja el encabezado del modo
-   actual (salir del reposo). El resto de la fila se refresca solo en el loop. */
+/* Vuelve a prender pantalla + luz y redibuja el titulo del modo actual al
+   despertar. El resto de la linea se completa solo en el loop. */
 static void Reposo_Wake(void)
 {
-  lcd_send_cmd(0x0C);  /* display on; esta transmision ya reenciende el backlight */
+  lcd_send_cmd(0x0C);  /* display on; esta misma transmision ya reenciende el backlight */
   lcd_clear();
   if (app_mode == MODE_CHANGE)
   {
@@ -351,8 +381,8 @@ static void Reposo_Wake(void)
   }
 }
 
-/* Inicializa TIM4_CH1 (PB6) como PWM de 50 Hz para el servo SG90.
-   Todo por codigo, sin tocar el .ioc. Asume el SYSCLK actual (TIM4 @ 8 MHz). */
+/* Arma TIM4_CH1 (PB6) como PWM de 50 Hz para el servo SG90. Otra vez todo por
+   codigo, sin tocar el .ioc. Cuenta con que TIM4 esta a 8 MHz. */
 static void MX_TIM4_PWM_Init_User(void)
 {
   GPIO_InitTypeDef gpio = {0};
@@ -367,7 +397,7 @@ static void MX_TIM4_PWM_Init_User(void)
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &gpio);
 
-  /* 8 MHz / (7+1) = 1 MHz => 1 tick = 1 us. Periodo 20000 us = 20 ms = 50 Hz */
+  /* 8MHz/(7+1) = 1MHz => cada tick es 1us. Periodo 20000us = 20ms = 50Hz */
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 7;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -380,7 +410,7 @@ static void MX_TIM4_PWM_Init_User(void)
   }
 
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 500;                 /* arranca en ~0 grados */
+  sConfigOC.Pulse = 500;                 /* arranca cerca de 0 grados */
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
@@ -391,7 +421,7 @@ static void MX_TIM4_PWM_Init_User(void)
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
 }
 
-/* Posiciona el servo en 0..180 grados (500..2500 us) */
+/* Manda el servo a un angulo 0..180 (que mapea a 500..2500 us de pulso) */
 static void Servo_SetAngle(uint8_t deg)
 {
   if (deg > 180) deg = 180;
@@ -434,16 +464,15 @@ int main(void)
   MX_ADC1_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  /* Segundo conversor ADC (ADC2 en PA7, 0-3.3V) */
+  /* ADC2 en PA7 (0-3.3V) */
   MX_ADC2_Init_User();
 
-  /* Servo del cerrojo SG90 (PB6 / TIM4_CH1): arranca el PWM y lo deja trabado */
+  /* Servo del cerrojo: arranco el PWM y lo dejo trabado */
   MX_TIM4_PWM_Init_User();
   Servo_SetAngle(SERVO_CLOSED_DEG);
 
-  /* --- TEST del servo (descomentar para probar el hardware): barre 0-90-180
-     sin depender de la clave. Si con esto se mueve, PWM y cableado estan bien;
-     volver a comentar despues. ---
+  /* Para probar el servo solo: descomento esto y barre 0-90-180 sin depender
+     de la clave. Si se mueve, PWM y cableado estan ok. Despues lo vuelvo a comentar.
 
 
   while (1)
@@ -455,20 +484,20 @@ int main(void)
 */
 
   lcd_init();
-  /* El modo por defecto es Ingresar clave: se muestra su encabezado */
+  /* Arranca en modo Ingresar, muestro el titulo */
   lcd_send_string("Ingresar clave");
 
-  /* Inicializa el registro de los ultimos 10 intentos de clave */
+  /* Recupero el ring de intentos */
   AttemptLog_Init();
 
-  /* Recupera la contrasena guardada en la EEPROM (si existe) */
+  /* Recupero la clave de la EEPROM si hay */
   Password_Load();
 
-  /* Arranca el contador de inactividad del modo reposo */
+  /* Pongo en hora el contador de inactividad del reposo */
   last_activity_tick = HAL_GetTick();
 
-  /* Descomentar UNA VEZ para ajustar la hora del DS3231 (luego volver a
-     comentar, ya que el modulo tiene bateria y mantiene la hora solo). */
+  /* Esto lo descomento UNA sola vez para poner la hora del DS3231. Despues lo
+     vuelvo a comentar porque el modulo tiene pila y se acuerda solo. */
   /*
   DS3231_Time set_time;
   set_time.year    = 2026;
@@ -480,6 +509,10 @@ int main(void)
   set_time.seconds = 0;
   DS3231_SetTime(&set_time);
   */
+  /* Prendo el contador de ciclos del DWT (CYCCNT) para medir el WCET */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -490,322 +523,75 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* Boton azul (B1): en cada pulsacion avanza el modo de operacion
-       Ingresar clave -> Cambiar clave -> Menu -> Ingresar clave ...
-       (el modo por defecto, en reposo, es Ingresar clave; 2 pulsadas
-       llegan al Menu) */
+    /* Arranca el cronometro de la vuelta (para el WCET) */
+    uint32_t _wcet_t0 = DWT->CYCCNT;
+
+    uint32_t now = HAL_GetTick();
+
+    /* 1) Boton azul (B1): cada toque avanza de modo
+          Ingresar -> Cambiar -> Menu -> Ingresar...
+          Lo ignoro si esta dormido o mostrando un mensaje. */
     if (button_flag)
     {
       button_flag = 0;
 
-      /* En reposo el boton azul se ignora (solo despierta el pote). */
-      if (!in_reposo)
+      if (!in_reposo && !msg_active)
       {
-      last_activity_tick = HAL_GetTick();
+        last_activity_tick = now;
 
-      app_mode = (uint8_t)((app_mode + 1) % MODE_COUNT);
+        app_mode = (uint8_t)((app_mode + 1) % MODE_COUNT);
 
-      /* al cambiar de modo se reinicia cualquier captura/ingreso a medias */
-      password_index = 0;
-      verify_index = 0;
+        /* si cambio de modo, tiro cualquier ingreso a medias */
+        password_index = 0;
+        verify_index = 0;
 
-      lcd_clear();
-      if (app_mode == MODE_CHANGE)
-      {
-        lcd_send_string("Cambiar clave");
-        lcd_set_cursor(1, 0);
-        lcd_send_string("Gire y confirme");
-      }
-      else if (app_mode == MODE_VERIFY)
-      {
-        lcd_send_string("Ingresar clave");
-        lcd_set_cursor(1, 0);
-        lcd_send_string("Gire y confirme");
-      }
-      else /* MODE_MENU */
-      {
-        menu_state = MENU_SELECT;   /* entra al menu eligiendo opcion */
-        lcd_send_string("Menu (PB0 = OK)");
-      }
+        lcd_clear();
+        if (app_mode == MODE_CHANGE)
+        {
+          lcd_send_string("Cambiar clave");
+          lcd_set_cursor(1, 0);
+          lcd_send_string("Gire y confirme");
+        }
+        else if (app_mode == MODE_VERIFY)
+        {
+          lcd_send_string("Ingresar clave");
+          lcd_set_cursor(1, 0);
+          lcd_send_string("Gire y confirme");
+        }
+        else /* MODE_MENU */
+        {
+          menu_state = MENU_SELECT;   /* entro al menu en modo elegir */
+          lcd_send_string("Menu (PB0 = OK)");
+        }
       }
     }
 
-    /* Boton de accion unico (PB0): flanco descendente
-       (con pull-up: suelto=1, presionado=0). Confirma el digito tanto
-       al cambiar como al ingresar la clave. */
+    /* 2) Boton PB0: flanco de bajada (con pull-up, suelto=1 apretado=0).
+          Lo muestreo en cada vuelta (rapido) y guardo el flanco en
+          action_pending para que la UI, que va mas lento, no se lo pierda. */
     GPIO_PinState action_btn_now = HAL_GPIO_ReadPin(CONFIRM_BTN_GPIO_Port, CONFIRM_BTN_Pin);
-    uint8_t action_pressed = (action_btn_last == GPIO_PIN_SET) && (action_btn_now == GPIO_PIN_RESET);
+    if ((action_btn_last == GPIO_PIN_SET) && (action_btn_now == GPIO_PIN_RESET))
+    {
+      action_pending = 1;
+      last_activity_tick = now;   /* apretar el boton tambien cuenta como actividad */
+    }
     action_btn_last = action_btn_now;
 
-    /* Detector de apertura de puerta (PA1) con logica de armado.
-       Una clave correcta DESARMA el sistema: mientras esta desarmado no
-       suena la alarma. El sistema se re-arma solo cuando la puerta se
-       vuelve a cerrar. */
+    /* 3) Seguridad: esto corre SIEMPRE, no lo frenan ni los mensajes ni el
+          reposo. Sensor de puerta (PA1) con logica de armado: una clave
+          correcta desarma el sistema, y cuando cierro la puerta se vuelve a
+          armar y a trabar el servo. */
     uint8_t door_open = DOOR_IS_OPEN() ? 1 : 0;
 
-    /* Flanco de cierre: al cerrarse la puerta, se re-arma */
-    if (!door_open && door_last)
+    if (!door_open && door_last)   /* justo cerre la puerta: re-armo */
     {
       disarmed = 0;
-      Servo_SetAngle(SERVO_CLOSED_DEG);           /* vuelve a trabar */
+      Servo_SetAngle(SERVO_CLOSED_DEG);
     }
     door_last = door_open;
 
-    /* Alarma por puerta: suena si la puerta esta abierta y el sistema no
-       fue desarmado por una clave correcta. Si esta desarmado, no suena
-       hasta que la puerta se cierre (ahi se re-arma). */
-    if (door_open && !disarmed)
-    {
-      HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_SET);
-    }
-    else
-    {
-      HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
-    }
-
-    HAL_ADC_Start(&hadc1);
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
-    {
-      adc_val = HAL_ADC_GetValue(&hadc1);
-      /* ADC de 12 bits (0-4095) mapeado a un digito de 0 a 9 */
-      digit = (adc_val * 10) / 4096;
-      if (digit > 9)
-      {
-        digit = 9;
-      }
-
-      /* --- Deteccion de actividad para el modo reposo ---
-         Movimiento del pote = variacion respecto de la referencia mayor al
-         umbral. Cualquier actividad (pote, boton azul ya contado arriba, o
-         boton de accion) reinicia el contador de inactividad. */
-      int32_t adc_delta = (int32_t)adc_val - (int32_t)adc_ref;
-      if (adc_delta < 0) adc_delta = -adc_delta;
-      uint8_t pot_moved = (adc_delta > POT_MOVE_THRESHOLD) ? 1 : 0;
-
-      if (pot_moved || action_pressed)
-      {
-        last_activity_tick = HAL_GetTick();
-        adc_ref = adc_val;
-
-        /* Salir del reposo SOLO por movimiento del pote (segun pedido) */
-        if (in_reposo && pot_moved)
-        {
-          in_reposo = 0;
-          Reposo_Wake();
-        }
-      }
-
-      /* En reposo se congela toda la interfaz (no se leen digitos ni se
-         actualiza el LCD). La seguridad sigue corriendo mas abajo. */
-      if (!in_reposo)
-      {
-
-      if (app_mode == MODE_CHANGE)
-      {
-        /* Cambiar clave: muestra el digito en vivo y lo confirma con PB0 */
-        lcd_set_cursor(1, 0);
-        snprintf(lcd_buf, sizeof(lcd_buf), "Dig %u/%u: %lu       ",
-                 password_index + 1, PASSWORD_LEN, digit);
-        lcd_send_string(lcd_buf);
-
-        if (action_pressed)
-        {
-          password[password_index] = (uint8_t)digit;
-          password_index++;
-
-          if (password_index >= PASSWORD_LEN)
-          {
-            /* Ya se confirmaron los 4 digitos: la clave queda guardada */
-            password_set = 1;
-
-            /* Persistir la contrasena en la EEPROM para que sobreviva
-               a un reset o corte de energia */
-            Password_Save();
-
-            lcd_clear();
-            lcd_send_string("Clave guardada:");
-            lcd_set_cursor(1, 0);
-            snprintf(lcd_buf, sizeof(lcd_buf), "%u%u%u%u",
-                     password[0], password[1], password[2], password[3]);
-            lcd_send_string(lcd_buf);
-            HAL_Delay(2000);
-
-            /* Vuelve al modo por defecto: Ingresar clave */
-            app_mode = MODE_VERIFY;
-            lcd_clear();
-            lcd_send_string("Ingresar clave");
-          }
-        }
-      }
-      else if (app_mode == MODE_VERIFY)
-      {
-        /* Ingresar clave: cada pulsada de PB0 registra el digito actual */
-        lcd_set_cursor(1, 0);
-        snprintf(lcd_buf, sizeof(lcd_buf), "Dig %u/%u: %lu       ",
-                 verify_index + 1, PASSWORD_LEN, digit);
-        lcd_send_string(lcd_buf);
-
-        if (action_pressed)
-        {
-          verify_buffer[verify_index] = (uint8_t)digit;
-          verify_index++;
-
-          if (verify_index >= PASSWORD_LEN)
-          {
-            /* 4to digito: comparar contra la clave guardada */
-            verify_index = 0;
-
-            lcd_clear();
-            if (!password_set)
-            {
-              lcd_send_string("No hay clave");
-              lcd_set_cursor(1, 0);
-              lcd_send_string("guardada aun");
-            }
-            else
-            {
-              uint8_t ok = (memcmp(verify_buffer, password, PASSWORD_LEN) == 0) ? 1 : 0;
-
-              if (ok)
-              {
-                HAL_GPIO_WritePin(OK_GPIO_Port, OK_Pin, GPIO_PIN_SET);  /* 3.3V */
-                lcd_send_string("Clave correcta");
-
-                /* Desarma el sistema: no suena la alarma hasta que la
-                   puerta se vuelva a cerrar */
-                disarmed = 1;
-
-                Servo_SetAngle(SERVO_OPEN_DEG);   /* libera la traba */
-              }
-              else
-              {
-                HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_SET);  /* 3.3V */
-                lcd_send_string("Clave incorrecta");
-              }
-
-              /* Registrar el intento (correcto o fallido) en el ring de los
-                 ultimos 10, con timestamp y los 4 digitos ingresados */
-              DS3231_GetTime(&rtc_time);
-              AttemptLog_Save(verify_buffer, ok, &rtc_time);
-            }
-            HAL_Delay(2000);
-            HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET); /* 0V */
-            HAL_GPIO_WritePin(OK_GPIO_Port, OK_Pin, GPIO_PIN_RESET);       /* 0V */
-
-            /* Vuelve al modo por defecto: Ingresar clave (listo para otro intento) */
-            app_mode = MODE_VERIFY;
-            lcd_clear();
-            lcd_send_string("Ingresar clave");
-          }
-        }
-      }
-      else
-      {
-        /* Modo Menu: el potenciometro elige la opcion y PB0 confirma.
-           Opciones: "Ver registro" (recorre los 10 intentos con el pote) y
-           "Ver reloj". Dentro de una opcion, PB0 vuelve al menu. */
-        if (menu_state == MENU_SELECT)
-        {
-          uint8_t sel = (uint8_t)((adc_val * MENU_OPT_COUNT) / 4096);
-          if (sel >= MENU_OPT_COUNT)
-          {
-            sel = MENU_OPT_COUNT - 1;
-          }
-
-          lcd_set_cursor(0, 0);
-          lcd_send_string("Menu (PB0 = OK) ");
-          lcd_set_cursor(1, 0);
-          snprintf(lcd_buf, sizeof(lcd_buf), ">%-15s", menu_opts[sel]);
-          lcd_send_string(lcd_buf);
-
-          if (action_pressed)
-          {
-            menu_state = (sel == 0) ? MENU_LOG : MENU_CLOCK;
-            lcd_clear();
-          }
-        }
-        else if (menu_state == MENU_LOG)
-        {
-          /* Ver registro: el pote elige cual de los intentos guardados se
-             muestra (0 = el mas viejo). PB0 vuelve al menu. */
-          if (attempt_count == 0)
-          {
-            lcd_set_cursor(0, 0);
-            lcd_send_string("Sin intentos    ");
-            lcd_set_cursor(1, 0);
-            lcd_send_string("PB0 = volver    ");
-          }
-          else
-          {
-            uint8_t idx = (uint8_t)((adc_val * attempt_count) / 4096);
-            if (idx >= attempt_count)
-            {
-              idx = attempt_count - 1;
-            }
-
-            /* el mas viejo esta en (attempt_next - attempt_count) del ring */
-            uint8_t slot = (uint8_t)((attempt_next + ATTEMPT_MAX - attempt_count + idx) % ATTEMPT_MAX);
-            uint16_t addr = (uint16_t)(ATTEMPT_STORE_ADDR + 4 + (slot * ATTEMPT_REC_SIZE));
-            uint8_t rec[ATTEMPT_REC_SIZE];
-            AT24C32_ReadBuffer(addr, rec, ATTEMPT_REC_SIZE);
-
-            /* Fila 0: fecha y hora (mes/dia hh:mm:ss) */
-            lcd_set_cursor(0, 0);
-            snprintf(lcd_buf, sizeof(lcd_buf), "%02u/%02u %02u:%02u:%02u",
-                     rec[1], rec[2], rec[3], rec[4], rec[5]);
-            lcd_send_string(lcd_buf);
-
-            /* Fila 1: indice/total, los 4 digitos y el resultado */
-            lcd_set_cursor(1, 0);
-            snprintf(lcd_buf, sizeof(lcd_buf), "%u/%u %u%u%u%u %-5s",
-                     idx + 1, attempt_count,
-                     rec[6], rec[7], rec[8], rec[9],
-                     rec[10] ? "OK" : "FALLO");
-            lcd_send_string(lcd_buf);
-          }
-
-          if (action_pressed)
-          {
-            menu_state = MENU_SELECT;
-            lcd_clear();
-          }
-        }
-        else /* MENU_CLOCK */
-        {
-          DS3231_GetTime(&rtc_time);
-
-          lcd_set_cursor(0, 0);
-          snprintf(lcd_buf, sizeof(lcd_buf), "%02u:%02u:%02u       ",
-                   rtc_time.hours, rtc_time.minutes, rtc_time.seconds);
-          lcd_send_string(lcd_buf);
-
-          lcd_set_cursor(1, 0);
-          snprintf(lcd_buf, sizeof(lcd_buf), "Nro:%lu PB0=menu", digit);
-          lcd_send_string(lcd_buf);
-
-          if (action_pressed)
-          {
-            menu_state = MENU_SELECT;
-            lcd_clear();
-          }
-        }
-      }
-      }  /* fin: if (!in_reposo) */
-    }
-    HAL_ADC_Stop(&hadc1);
-
-    /* Reposo: si paso REPOSO_TIMEOUT_MS sin actividad, apaga la interfaz.
-       adc_ref queda en la posicion actual del pote para medir el proximo
-       movimiento que lo despierte. */
-    if (!in_reposo && (HAL_GetTick() - last_activity_tick) > REPOSO_TIMEOUT_MS)
-    {
-      in_reposo = 1;
-      adc_ref = adc_val;
-      LCD_Sleep();
-    }
-
-    /* Segundo ADC (ADC2 / PA7): mide una tension de 0 a 3.3V.
-       adc2_val = lectura cruda (0-4095); adc2_mv = milivolts (0-3300). */
+    /* Leo el ADC2 (PA7), tension de 0 a 3.3V.
+       adc2_val = crudo (0-4095), adc2_mv = lo mismo en mV. */
     HAL_ADC_Start(&hadc2);
     if (HAL_ADC_PollForConversion(&hadc2, 10) == HAL_OK)
     {
@@ -814,15 +600,319 @@ int main(void)
     }
     HAL_ADC_Stop(&hadc2);
 
-    /* Si la tension supera 1V (1000 mV), se dispara la alarma, salvo que
-       el sistema este desarmado por una clave correcta (no suena hasta que
-       la puerta se cierre). Solo fuerza el encendido de PA4. */
-    if (!disarmed && adc2_mv > ADC2_ALARM_MV)
+    /* 4) Salidas: recalculo la alarma (PA4) y el pin OK (PA6) en cada vuelta,
+          segun las condiciones y las ventanas de tiempo, en vez de dejarlas
+          fijas con HAL_Delay.
+          La alarma se prende si la puerta esta abierta y no desarme, o si la
+          tension se paso, o si estoy dentro del pulso de clave incorrecta.
+          El OK se prende dentro del pulso de clave correcta. */
+    uint8_t alarm_on = 0;
+    if (!disarmed && door_open)                 alarm_on = 1;
+    if (!disarmed && adc2_mv > ADC2_ALARM_MV)   alarm_on = 1;
+    if (now < alarm_until)                       alarm_on = 1;  /* pulso de clave incorrecta */
+    HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, alarm_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    HAL_GPIO_WritePin(OK_GPIO_Port, OK_Pin,
+                      (now < ok_pulse_until) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    /* 5) Se termino un mensaje temporal (esto reemplaza al HAL_Delay(2000)):
+          cuando vence, vuelvo al modo Ingresar. */
+    if (msg_active && (int32_t)(now - msg_until) >= 0)
     {
-      HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_SET);
+      msg_active = 0;
+      app_mode = MODE_VERIFY;
+      verify_index = 0;
+      password_index = 0;
+      action_pending = 0;   /* tiro las pulsadas que pasaron durante el mensaje */
+      lcd_clear();
+      lcd_send_string("Ingresar clave");
+      ui_tick = now;   /* asi no refresca justo al toque */
     }
 
-    HAL_Delay(300);
+    /* 6) Interfaz: la refresco solo cada UI_PERIOD_MS y solo si no hay mensaje
+          en pantalla. Aca leo el pote (ADC1), elijo/ingreso el digito y dibujo. */
+    if (!msg_active && (now - ui_tick) >= UI_PERIOD_MS)
+    {
+      ui_tick = now;
+
+      HAL_ADC_Start(&hadc1);
+      if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
+      {
+        adc_val = HAL_ADC_GetValue(&hadc1);
+        /* paso los 12 bits del ADC (0-4095) a un digito 0..9 */
+        digit = (adc_val * 10) / 4096;
+        if (digit > 9)
+        {
+          digit = 9;
+        }
+
+        /* Detecto actividad para el reposo: cuento como "movimiento" si el
+           pote se movio mas que el umbral respecto de la referencia. Apretar
+           el boton tambien cuenta. */
+        int32_t adc_delta = (int32_t)adc_val - (int32_t)adc_ref;
+        if (adc_delta < 0) adc_delta = -adc_delta;
+        uint8_t pot_moved = (adc_delta > POT_MOVE_THRESHOLD) ? 1 : 0;
+
+        if (pot_moved || action_pending)
+        {
+          last_activity_tick = now;
+          adc_ref = adc_val;
+
+          /* Del reposo salgo solo moviendo el pote (asi lo pidieron) */
+          if (in_reposo && pot_moved)
+          {
+            in_reposo = 0;
+            Reposo_Wake();
+          }
+        }
+
+        /* Si esta dormido, congelo la interfaz (no leo digitos ni toco el
+           LCD). La seguridad ya corrio mas arriba igual. */
+        if (!in_reposo)
+        {
+
+        if (app_mode == MODE_CHANGE)
+        {
+          /* Cambiar clave: muestro el digito en vivo y lo confirmo con PB0 */
+          lcd_set_cursor(1, 0);
+          snprintf(lcd_buf, sizeof(lcd_buf), "Dig %u/%u: %lu       ",
+                   password_index + 1, PASSWORD_LEN, digit);
+          lcd_send_string(lcd_buf);
+
+          if (action_pending)
+          {
+            password[password_index] = (uint8_t)digit;
+            password_index++;
+
+            if (password_index >= PASSWORD_LEN)
+            {
+              /* Ya entraron los 4 digitos: queda la clave nueva */
+              password_set = 1;
+
+              /* La escribo en la EEPROM asi sobrevive a un reset o corte de luz */
+              Password_Save();
+
+              lcd_clear();
+              lcd_send_string("Clave guardada:");
+              lcd_set_cursor(1, 0);
+              snprintf(lcd_buf, sizeof(lcd_buf), "%u%u%u%u",
+                       password[0], password[1], password[2], password[3]);
+              lcd_send_string(lcd_buf);
+
+              /* Mensaje temporal (no bloqueante): dura MSG_SHOW_MS y despues
+                 el bloque (5) me devuelve a "Ingresar clave". */
+              msg_active = 1;
+              msg_until  = now + MSG_SHOW_MS;
+            }
+          }
+        }
+        else if (app_mode == MODE_VERIFY)
+        {
+          /* Ingresar clave: cada toque de PB0 fija el digito actual */
+          lcd_set_cursor(1, 0);
+          snprintf(lcd_buf, sizeof(lcd_buf), "Dig %u/%u: %lu       ",
+                   verify_index + 1, PASSWORD_LEN, digit);
+          lcd_send_string(lcd_buf);
+
+          if (action_pending)
+          {
+            verify_buffer[verify_index] = (uint8_t)digit;
+            verify_index++;
+
+            if (verify_index >= PASSWORD_LEN)
+            {
+              /* llegue al 4to: comparo contra la clave guardada */
+              verify_index = 0;
+
+              lcd_clear();
+              if (!password_set)
+              {
+                lcd_send_string("No hay clave");
+                lcd_set_cursor(1, 0);
+                lcd_send_string("guardada aun");
+              }
+              else
+              {
+                uint8_t ok = (memcmp(verify_buffer, password, PASSWORD_LEN) == 0) ? 1 : 0;
+
+                if (ok)
+                {
+                  /* pulso el OK (PA6) por MSG_SHOW_MS */
+                  ok_pulse_until = now + MSG_SHOW_MS;
+                  lcd_send_string("Clave correcta");
+
+                  /* desarmo: no suena la alarma hasta que cierre la puerta */
+                  disarmed = 1;
+
+                  Servo_SetAngle(SERVO_OPEN_DEG);   /* suelto la traba */
+                }
+                else
+                {
+                  /* pulso la alarma (PA4) por MSG_SHOW_MS, el bloque 4 la
+                     mantiene en alto */
+                  alarm_until = now + MSG_SHOW_MS;
+                  lcd_send_string("Clave incorrecta");
+                }
+
+                /* guardo el intento (ok o no) en el ring, con fecha/hora y los
+                   4 digitos que se tecliaron */
+                DS3231_GetTime(&rtc_time);
+                AttemptLog_Save(verify_buffer, ok, &rtc_time);
+              }
+
+              /* Mensaje temporal: el bloque (5) me devuelve a "Ingresar" al
+                 vencer, y el (4) apaga los pulsos de OK/alarma cuando corresponde. */
+              msg_active = 1;
+              msg_until  = now + MSG_SHOW_MS;
+            }
+          }
+        }
+        else
+        {
+          /* Menu: elijo la opcion con el pote y confirmo con PB0. Las opciones
+             son "Ver registro" (recorro los 10 intentos con el pote) y "Ver
+             reloj". Estando adentro de una, PB0 me vuelve al menu. */
+          if (menu_state == MENU_SELECT)
+          {
+            uint8_t sel = (uint8_t)((adc_val * MENU_OPT_COUNT) / 4096);
+            if (sel >= MENU_OPT_COUNT)
+            {
+              sel = MENU_OPT_COUNT - 1;
+            }
+
+            lcd_set_cursor(0, 0);
+            lcd_send_string("Menu (PB0 = OK) ");
+            lcd_set_cursor(1, 0);
+            snprintf(lcd_buf, sizeof(lcd_buf), ">%-15s", menu_opts[sel]);
+            lcd_send_string(lcd_buf);
+
+            if (action_pending)
+            {
+              menu_state = (sel == 0) ? MENU_LOG : MENU_CLOCK;
+              lcd_clear();
+            }
+          }
+          else if (menu_state == MENU_LOG)
+          {
+            /* Ver registro: con el pote elijo cual intento miro (el 0 es el
+               mas viejo). PB0 vuelve al menu. */
+            if (attempt_count == 0)
+            {
+              lcd_set_cursor(0, 0);
+              lcd_send_string("Sin intentos    ");
+              lcd_set_cursor(1, 0);
+              lcd_send_string("PB0 = volver    ");
+            }
+            else
+            {
+              uint8_t idx = (uint8_t)((adc_val * attempt_count) / 4096);
+              if (idx >= attempt_count)
+              {
+                idx = attempt_count - 1;
+              }
+
+              /* el mas viejo esta en (attempt_next - attempt_count) del ring */
+              uint8_t slot = (uint8_t)((attempt_next + ATTEMPT_MAX - attempt_count + idx) % ATTEMPT_MAX);
+              uint16_t addr = (uint16_t)(ATTEMPT_STORE_ADDR + 4 + (slot * ATTEMPT_REC_SIZE));
+              uint8_t rec[ATTEMPT_REC_SIZE];
+              AT24C32_ReadBuffer(addr, rec, ATTEMPT_REC_SIZE);
+
+              /* linea de arriba: fecha y hora (mes/dia hh:mm:ss) */
+              lcd_set_cursor(0, 0);
+              snprintf(lcd_buf, sizeof(lcd_buf), "%02u/%02u %02u:%02u:%02u",
+                       rec[1], rec[2], rec[3], rec[4], rec[5]);
+              lcd_send_string(lcd_buf);
+
+              /* linea de abajo: nro/total, los 4 digitos y si dio ok o fallo */
+              lcd_set_cursor(1, 0);
+              snprintf(lcd_buf, sizeof(lcd_buf), "%u/%u %u%u%u%u %-5s",
+                       idx + 1, attempt_count,
+                       rec[6], rec[7], rec[8], rec[9],
+                       rec[10] ? "OK" : "FALLO");
+              lcd_send_string(lcd_buf);
+            }
+
+            if (action_pending)
+            {
+              menu_state = MENU_SELECT;
+              lcd_clear();
+            }
+          }
+          else /* MENU_CLOCK */
+          {
+            DS3231_GetTime(&rtc_time);
+
+            lcd_set_cursor(0, 0);
+            snprintf(lcd_buf, sizeof(lcd_buf), "%02u:%02u:%02u       ",
+                     rtc_time.hours, rtc_time.minutes, rtc_time.seconds);
+            lcd_send_string(lcd_buf);
+
+            lcd_set_cursor(1, 0);
+            snprintf(lcd_buf, sizeof(lcd_buf), "Nro:%lu PB0=menu", digit);
+            lcd_send_string(lcd_buf);
+
+            if (action_pending)
+            {
+              menu_state = MENU_SELECT;
+              lcd_clear();
+            }
+          }
+        }
+        }  /* fin: if (!in_reposo) */
+      }
+      HAL_ADC_Stop(&hadc1);
+
+      /* la UI ya uso el flanco de PB0 de esta vuelta */
+      action_pending = 0;
+    }
+
+    /* 7) Reposo: si pase REPOSO_TIMEOUT_MS sin hacer nada, apago la interfaz.
+          No me duermo si hay un mensaje en pantalla. */
+    if (!in_reposo && !msg_active &&
+        (now - last_activity_tick) > REPOSO_TIMEOUT_MS)
+    {
+      in_reposo = 1;
+      adc_ref = adc_val;
+      LCD_Sleep();
+    }
+
+    /* nada de HAL_Delay, el loop no se bloquea nunca */
+
+    /* Aca cierro el cronometro de la vuelta. La resta banca bien el wrap del
+       CYCCNT de 32 bits (a 8 MHz recien da la vuelta a los ~536 s). El wcet
+       solo sube cuando aparece un peor caso, asi que hay que dejar correr un
+       rato y pasar por los caminos mas pesados (refresco de LCD, leer la
+       EEPROM en "Ver registro") para agarrar el maximo de verdad. */
+    let_cycles = DWT->CYCCNT - _wcet_t0;
+    let_us     = let_cycles / (SystemCoreClock / 1000000U);
+    if (let_cycles > wcet_cycles)
+    {
+      wcet_cycles = let_cycles;
+      wcet_us     = let_us;
+
+      /* recalculo U con el peor caso nuevo. Lo hago con ciclos crudos que es
+         mas preciso que con us. periodo en ciclos = WCET_PERIOD_US * 8 (a 8MHz). */
+      uint32_t _period_cyc = WCET_PERIOD_US * (SystemCoreClock / 1000000U);
+      u_factor = (float)wcet_cycles / (float)_period_cyc;
+      u_x1000  = (uint32_t)(((uint64_t)wcet_cycles * 1000U) / _period_cyc);
+      u_pct    = (uint32_t)(((uint64_t)wcet_cycles * 100U)  / _period_cyc);
+    }
+
+    /* Promedio (ACET): media de todas las vueltas desde el arranque. Esto cae
+       fuera de la ventana medida asi que no me ensucia el WCET. */
+    _acc_cycles += let_cycles;
+    _sample_cnt++;
+    if (_sample_cnt != 0)
+    {
+      avg_cycles = (uint32_t)(_acc_cycles / _sample_cnt);
+      avg_us     = avg_cycles / (SystemCoreClock / 1000000U);
+
+      /* U promedio = ACET / periodo de referencia */
+      uint32_t _period_cyc_a = WCET_PERIOD_US * (SystemCoreClock / 1000000U);
+      u_avg_factor = (float)avg_cycles / (float)_period_cyc_a;
+      u_avg_x1000  = (uint32_t)(((uint64_t)avg_cycles * 1000U) / _period_cyc_a);
+      u_avg_pct    = (uint32_t)(((uint64_t)avg_cycles * 100U)  / _period_cyc_a);
+    }
   }
   /* USER CODE END 3 */
 }
@@ -1037,20 +1127,20 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* Boton de accion unico (PB0 -> GND). Se lee por polling, no por
-     interrupcion, para no modificar el vector de interrupciones. */
+  /* Boton PB0 (a GND). Lo leo por polling y no por interrupcion asi no tengo
+     que meter mano en el vector de interrupciones. */
   GPIO_InitStruct.Pin = CONFIRM_BTN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(CONFIRM_BTN_GPIO_Port, &GPIO_InitStruct);
 
-  /* Detector de apertura de puerta (PA1, entrada con pull-up) */
+  /* Sensor de puerta (PA1, entrada con pull-up) */
   GPIO_InitStruct.Pin = DOOR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(DOOR_GPIO_Port, &GPIO_InitStruct);
 
-  /* Salida de alarma para clave incorrecta (arranca en bajo = 0V) */
+  /* Salida de alarma (arranca en 0V) */
   HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
   GPIO_InitStruct.Pin = ALARM_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -1058,7 +1148,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(ALARM_GPIO_Port, &GPIO_InitStruct);
 
-  /* Salida de "clave correcta" (arranca en bajo = 0V) */
+  /* Salida de "clave OK" (arranca en 0V) */
   HAL_GPIO_WritePin(OK_GPIO_Port, OK_Pin, GPIO_PIN_RESET);
   GPIO_InitStruct.Pin = OK_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -1070,8 +1160,8 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 /**
-  * @brief Callback de interrupcion externa (EXTI). Se llama automaticamente
-  *        cuando se presiona el boton B1 (u otro pin configurado como IT).
+  * @brief Callback de la EXTI. Salta solo cuando aprieto el boton B1 (o
+  *        cualquier pin que este como interrupcion).
   */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
@@ -1080,7 +1170,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
   if (GPIO_Pin == B1_Pin)
   {
-    /* Antirrebote simple: ignora pulsos que lleguen antes de 200 ms */
+    /* antirrebote a lo bruto: ignoro lo que llegue antes de 200 ms */
     if ((now - last_press_tick) > 200)
     {
       last_press_tick = now;

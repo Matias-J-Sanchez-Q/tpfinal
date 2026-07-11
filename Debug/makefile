@@ -34,34 +34,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := Tp_final
+BUILD_ARTIFACT_NAME := tpfinal
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-Tp_final.elf \
+tpfinal.elf \
 
 MAP_FILES += \
-Tp_final.map \
+tpfinal.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-Tp_final.list \
+tpfinal.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: Tp_final.elf secondary-outputs
+main-build: tpfinal.elf secondary-outputs
 
 # Tool invocations
-Tp_final.elf Tp_final.map: $(OBJS) $(USER_OBJS) /home/matute/STM32CubeIDE/workspace_1.19.0_01/Tp_final/STM32F103RBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "Tp_final.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"/home/matute/STM32CubeIDE/workspace_1.19.0_01/Tp_final/STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Tp_final.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+tpfinal.elf tpfinal.map: $(OBJS) $(USER_OBJS) /home/matute/STM32CubeIDE/workspace_1.19.0_01/tpfinal/STM32F103RBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "tpfinal.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"/home/matute/STM32CubeIDE/workspace_1.19.0_01/tpfinal/STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="tpfinal.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -70,14 +70,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-Tp_final.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "Tp_final.list"
+tpfinal.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "tpfinal.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) Tp_final.elf Tp_final.list Tp_final.map default.size.stdout
+	-$(RM) default.size.stdout tpfinal.elf tpfinal.list tpfinal.map
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)
